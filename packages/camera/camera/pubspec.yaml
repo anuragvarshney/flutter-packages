@@ -22,7 +22,11 @@ flutter:
 
 dependencies:
   camera_android: ^0.10.7
-  camera_avfoundation: ^0.9.13
+  camera_avfoundation:
+    git:
+      url: https://github.com/anuragvarshney/flutter-packages.git
+      path: packages/camera/camera_avfoundation
+      ref: main
   camera_platform_interface: ^2.5.0
   camera_web: ^0.3.1
   flutter:
