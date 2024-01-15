@@ -31,6 +31,7 @@ class ShellRouteExampleApp extends StatelessWidget {
   final GoRouter _router = GoRouter(
     navigatorKey: _rootNavigatorKey,
     initialLocation: '/a',
+    debugLogDiagnostics: true,
     routes: <RouteBase>[
       /// Application shell
       ShellRoute(
@@ -151,7 +152,7 @@ class ScaffoldWithNavBar extends StatelessWidget {
   }
 
   static int _calculateSelectedIndex(BuildContext context) {
-    final String location = GoRouterState.of(context).location;
+    final String location = GoRouterState.of(context).uri.toString();
     if (location.startsWith('/a')) {
       return 0;
     }
@@ -168,13 +169,10 @@ class ScaffoldWithNavBar extends StatelessWidget {
     switch (index) {
       case 0:
         GoRouter.of(context).go('/a');
-        break;
       case 1:
         GoRouter.of(context).go('/b');
-        break;
       case 2:
         GoRouter.of(context).go('/c');
-        break;
     }
   }
 }

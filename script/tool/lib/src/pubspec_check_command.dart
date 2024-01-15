@@ -3,14 +3,15 @@
 // found in the LICENSE file.
 
 import 'package:file/file.dart';
-import 'package:git/git.dart';
-import 'package:platform/platform.dart';
+import 'package:path/path.dart' as p;
 import 'package:pub_semver/pub_semver.dart';
+import 'package:pubspec_parse/pubspec_parse.dart';
 import 'package:yaml/yaml.dart';
 
 import 'common/core.dart';
+import 'common/output_utils.dart';
 import 'common/package_looping_command.dart';
-import 'common/process_runner.dart';
+import 'common/plugin_utils.dart';
 import 'common/repository_package.dart';
 
 /// A command to enforce pubspec conventions across the repository.
@@ -21,24 +22,34 @@ import 'common/repository_package.dart';
 class PubspecCheckCommand extends PackageLoopingCommand {
   /// Creates an instance of the version check command.
   PubspecCheckCommand(
-    Directory packagesDir, {
-    ProcessRunner processRunner = const ProcessRunner(),
-    Platform platform = const LocalPlatform(),
-    GitDir? gitDir,
-  }) : super(
-          packagesDir,
-          processRunner: processRunner,
-          platform: platform,
-          gitDir: gitDir,
-        ) {
+    super.packagesDir, {
+    super.processRunner,
+    super.platform,
+    super.gitDir,
+  }) {
     argParser.addOption(
       _minMinFlutterVersionFlag,
       help:
           'The minimum Flutter version to allow as the minimum SDK constraint.',
     );
+    argParser.addMultiOption(_allowDependenciesFlag,
+        help: 'Packages (comma separated) that are allowed as dependencies or '
+            'dev_dependencies.\n\n'
+            'Alternately, a list of one or more YAML files that contain a list '
+            'of allowed dependencies.',
+        defaultsTo: <String>[]);
+    argParser.addMultiOption(_allowPinnedDependenciesFlag,
+        help: 'Packages (comma separated) that are allowed as dependencies or '
+            'dev_dependencies only if pinned to an exact version.\n\n'
+            'Alternately, a list of one or more YAML files that contain a list '
+            'of allowed pinned dependencies.',
+        defaultsTo: <String>[]);
   }
 
   static const String _minMinFlutterVersionFlag = 'min-min-flutter-version';
+  static const String _allowDependenciesFlag = 'allow-dependencies';
+  static const String _allowPinnedDependenciesFlag =
+      'allow-pinned-dependencies';
 
   // Section order for plugins. Because the 'flutter' section is critical
   // information for plugins, and usually small, it goes near the top unlike in
@@ -48,6 +59,8 @@ class PubspecCheckCommand extends PackageLoopingCommand {
     'flutter:',
     'dependencies:',
     'dev_dependencies:',
+    'topics:',
+    'screenshots:',
     'false_secrets:',
   ];
 
@@ -56,14 +69,26 @@ class PubspecCheckCommand extends PackageLoopingCommand {
     'dependencies:',
     'dev_dependencies:',
     'flutter:',
+    'topics:',
+    'screenshots:',
     'false_secrets:',
   ];
 
   static const String _expectedIssueLinkFormat =
       'https://github.com/flutter/flutter/issues?q=is%3Aissue+is%3Aopen+label%3A';
 
+  // The names of all published packages in the repository.
+  late final Set<String> _localPackages = <String>{};
+
+  // Packages on the explicit allow list.
+  late final Set<String> _allowedUnpinnedPackages = <String>{};
+  late final Set<String> _allowedPinnedPackages = <String>{};
+
   @override
   final String name = 'pubspec-check';
+
+  @override
+  List<String> get aliases => <String>['check-pubspec'];
 
   @override
   final String description =
@@ -75,6 +100,40 @@ class PubspecCheckCommand extends PackageLoopingCommand {
   @override
   PackageLoopingType get packageLoopingType =>
       PackageLoopingType.includeAllSubpackages;
+
+  @override
+  Future<void> initializeRun() async {
+    // Find all local, published packages.
+    for (final File pubspecFile in (await packagesDir.parent
+            .list(recursive: true, followLinks: false)
+            .toList())
+        .whereType<File>()
+        .where((File entity) => p.basename(entity.path) == 'pubspec.yaml')) {
+      final Pubspec? pubspec = _tryParsePubspec(pubspecFile.readAsStringSync());
+      if (pubspec != null && pubspec.publishTo != 'none') {
+        _localPackages.add(pubspec.name);
+      }
+    }
+    // Load explicitly allowed packages.
+    _allowedUnpinnedPackages
+        .addAll(_getAllowedPackages(_allowDependenciesFlag));
+    _allowedPinnedPackages
+        .addAll(_getAllowedPackages(_allowPinnedDependenciesFlag));
+  }
+
+  Iterable<String> _getAllowedPackages(String flag) {
+    return getStringListArg(flag).expand<String>((String item) {
+      if (item.endsWith('.yaml')) {
+        final File file = packagesDir.fileSystem.file(item);
+        final Object? yaml = loadYaml(file.readAsStringSync());
+        if (yaml == null) {
+          return <String>[];
+        }
+        return (yaml as YamlList).toList().cast<String>();
+      }
+      return <String>[item];
+    });
+  }
 
   @override
   Future<PackageResult> runForPackage(RepositoryPackage package) async {
@@ -139,6 +198,12 @@ class PubspecCheckCommand extends PackageLoopingCommand {
       }
     }
 
+    final String? dependenciesError = _checkDependencies(pubspec);
+    if (dependenciesError != null) {
+      printError('$indentation$dependenciesError');
+      passing = false;
+    }
+
     // Ignore metadata that's only relevant for published packages if the
     // packages is not intended for publishing.
     if (pubspec.publishTo != 'none') {
@@ -156,6 +221,12 @@ class PubspecCheckCommand extends PackageLoopingCommand {
             '${indentation}A package should have an "issue_tracker" link to a '
             'search for open flutter/flutter bugs with the relevant label:\n'
             '${indentation * 2}$_expectedIssueLinkFormat<package label>');
+        passing = false;
+      }
+
+      final String? topicsError = _checkTopics(pubspec, package: package);
+      if (topicsError != null) {
+        printError('$indentation$topicsError');
         passing = false;
       }
 
@@ -259,6 +330,46 @@ class PubspecCheckCommand extends PackageLoopingCommand {
             ?.toString()
             .startsWith(_expectedIssueLinkFormat) ??
         false;
+  }
+
+  // Validates the "topics" keyword for a plugin, returning an error
+  // string if there are any issues.
+  String? _checkTopics(
+    Pubspec pubspec, {
+    required RepositoryPackage package,
+  }) {
+    final List<String> topics = pubspec.topics ?? <String>[];
+    if (topics.isEmpty) {
+      return 'A published package should include "topics". '
+          'See https://dart.dev/tools/pub/pubspec#topics.';
+    }
+    if (topics.length > 5) {
+      return 'A published package should have maximum 5 topics. '
+          'See https://dart.dev/tools/pub/pubspec#topics.';
+    }
+    if (isFlutterPlugin(package) && package.isFederated) {
+      final String pluginName = package.directory.parent.basename;
+      // '_' isn't allowed in topics, so convert to '-'.
+      final String topicName = pluginName.replaceAll('_', '-');
+      if (!topics.contains(topicName)) {
+        return 'A federated plugin package should include its plugin name as '
+            'a topic. Add "$topicName" to the "topics" section.';
+      }
+    }
+    
+    // Validates topic names according to https://dart.dev/tools/pub/pubspec#topics
+    final RegExp expectedTopicFormat = RegExp(r'^[a-z](?:-?[a-z0-9]+)*$');
+    final Iterable<String> invalidTopics = topics.where((String topic) =>
+        !expectedTopicFormat.hasMatch(topic) ||
+        topic.length < 2 ||
+        topic.length > 32);
+    if (invalidTopics.isNotEmpty) {
+      return 'Invalid topic(s): ${invalidTopics.join(', ')} in "topics" section. '
+          'Topics must consist of lowercase alphanumerical characters or dash (but no double dash), '
+          'start with a-z and ending with a-z or 0-9, have a minimum of 2 characters '
+          'and have a maximum of 32 characters.';
+    }
+    return null;
   }
 
   // Validates the "implements" keyword for a plugin, returning an error
@@ -425,5 +536,51 @@ class PubspecCheckCommand extends PackageLoopingCommand {
       result = constraint.min;
     }
     return result ?? Version.none;
+  }
+
+  // Validates the dependencies for a package, returning an error string if
+  // there are any that aren't allowed.
+  String? _checkDependencies(Pubspec pubspec) {
+    final Set<String> badDependencies = <String>{};
+    for (final Map<String, Dependency> dependencies
+        in <Map<String, Dependency>>[
+      pubspec.dependencies,
+      pubspec.devDependencies
+    ]) {
+      dependencies.forEach((String name, Dependency dependency) {
+        if (!_shouldAllowDependency(name, dependency)) {
+          badDependencies.add(name);
+        }
+      });
+    }
+    if (badDependencies.isEmpty) {
+      return null;
+    }
+    return 'The following unexpected non-local dependencies were found:\n'
+        '${badDependencies.map((String name) => '  $name').join('\n')}\n'
+        'Please see https://github.com/flutter/flutter/wiki/Contributing-to-Plugins-and-Packages#Dependencies '
+        'for more information and next steps.';
+  }
+
+  // Checks whether a given dependency is allowed.
+  bool _shouldAllowDependency(String name, Dependency dependency) {
+    if (dependency is PathDependency || dependency is SdkDependency) {
+      return true;
+    }
+    if (_localPackages.contains(name) ||
+        _allowedUnpinnedPackages.contains(name)) {
+      return true;
+    }
+    if (dependency is HostedDependency &&
+        _allowedPinnedPackages.contains(name)) {
+      final VersionConstraint constraint = dependency.version;
+      if (constraint is VersionRange &&
+          constraint.min != null &&
+          constraint.max != null &&
+          constraint.min == constraint.max) {
+        return true;
+      }
+    }
+    return false;
   }
 }

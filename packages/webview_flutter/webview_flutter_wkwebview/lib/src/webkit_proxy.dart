@@ -71,6 +71,14 @@ class WebKitProxy {
     void Function(WKWebView webView, NSError error)?
         didFailProvisionalNavigation,
     void Function(WKWebView webView)? webViewWebContentProcessDidTerminate,
+    void Function(
+      WKWebView webView,
+      NSUrlAuthenticationChallenge challenge,
+      void Function(
+        NSUrlSessionAuthChallengeDisposition disposition,
+        NSUrlCredential? credential,
+      ) completionHandler,
+    )? didReceiveAuthenticationChallenge,
   }) createNavigationDelegate;
 
   /// Constructs a [WKUIDelegate].
@@ -80,5 +88,13 @@ class WebKitProxy {
       WKWebViewConfiguration configuration,
       WKNavigationAction navigationAction,
     )? onCreateWebView,
+    Future<WKPermissionDecision> Function(
+      WKUIDelegate instance,
+      WKWebView webView,
+      WKSecurityOrigin origin,
+      WKFrameInfo frame,
+      WKMediaCaptureType type,
+    )? requestMediaCapturePermission,
+    InstanceManager? instanceManager,
   }) createUIDelegate;
 }

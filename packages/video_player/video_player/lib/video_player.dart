@@ -14,7 +14,7 @@ import 'package:video_player_platform_interface/video_player_platform_interface.
 import 'src/closed_caption_file.dart';
 
 export 'package:video_player_platform_interface/video_player_platform_interface.dart'
-    show DurationRange, DataSourceType, VideoFormat, VideoPlayerOptions;
+    show DataSourceType, DurationRange, VideoFormat, VideoPlayerOptions;
 
 export 'src/closed_caption_file.dart';
 
@@ -33,10 +33,11 @@ VideoPlayerPlatform get _videoPlayerPlatform {
 
 /// The duration, current position, buffering state, error state and settings
 /// of a [VideoPlayerController].
+@immutable
 class VideoPlayerValue {
   /// Constructs a video with the given values. Only [duration] is required. The
   /// rest will initialize with default values when unset.
-  VideoPlayerValue({
+  const VideoPlayerValue({
     required this.duration,
     this.size = Size.zero,
     this.position = Duration.zero,
@@ -51,14 +52,15 @@ class VideoPlayerValue {
     this.playbackSpeed = 1.0,
     this.rotationCorrection = 0,
     this.errorDescription,
+    this.isCompleted = false,
   });
 
   /// Returns an instance for a video that hasn't been loaded.
-  VideoPlayerValue.uninitialized()
+  const VideoPlayerValue.uninitialized()
       : this(duration: Duration.zero, isInitialized: false);
 
   /// Returns an instance with the given [errorDescription].
-  VideoPlayerValue.erroneous(String errorDescription)
+  const VideoPlayerValue.erroneous(String errorDescription)
       : this(
             duration: Duration.zero,
             isInitialized: false,
@@ -110,6 +112,12 @@ class VideoPlayerValue {
   /// If [hasError] is false this is `null`.
   final String? errorDescription;
 
+  /// True if video has finished playing to end.
+  ///
+  /// Reverts to false if video position changes, or video begins playing.
+  /// Does not update if video is looping.
+  final bool isCompleted;
+
   /// The [size] of the currently loaded video.
   final Size size;
 
@@ -157,6 +165,7 @@ class VideoPlayerValue {
     double? playbackSpeed,
     int? rotationCorrection,
     String? errorDescription = _defaultErrorDescription,
+    bool? isCompleted,
   }) {
     return VideoPlayerValue(
       duration: duration ?? this.duration,
@@ -175,6 +184,7 @@ class VideoPlayerValue {
       errorDescription: errorDescription != _defaultErrorDescription
           ? errorDescription
           : this.errorDescription,
+      isCompleted: isCompleted ?? this.isCompleted,
     );
   }
 
@@ -193,8 +203,49 @@ class VideoPlayerValue {
         'isBuffering: $isBuffering, '
         'volume: $volume, '
         'playbackSpeed: $playbackSpeed, '
-        'errorDescription: $errorDescription)';
+        'errorDescription: $errorDescription, '
+        'isCompleted: $isCompleted),';
   }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is VideoPlayerValue &&
+          runtimeType == other.runtimeType &&
+          duration == other.duration &&
+          position == other.position &&
+          caption == other.caption &&
+          captionOffset == other.captionOffset &&
+          listEquals(buffered, other.buffered) &&
+          isPlaying == other.isPlaying &&
+          isLooping == other.isLooping &&
+          isBuffering == other.isBuffering &&
+          volume == other.volume &&
+          playbackSpeed == other.playbackSpeed &&
+          errorDescription == other.errorDescription &&
+          size == other.size &&
+          rotationCorrection == other.rotationCorrection &&
+          isInitialized == other.isInitialized &&
+          isCompleted == other.isCompleted;
+
+  @override
+  int get hashCode => Object.hash(
+        duration,
+        position,
+        caption,
+        captionOffset,
+        buffered,
+        isPlaying,
+        isLooping,
+        isBuffering,
+        volume,
+        playbackSpeed,
+        errorDescription,
+        size,
+        rotationCorrection,
+        isInitialized,
+        isCompleted,
+      );
 }
 
 /// Controls a platform video player, and provides updates when the state is
@@ -221,17 +272,18 @@ class VideoPlayerController extends ValueNotifier<VideoPlayerValue> {
         dataSourceType = DataSourceType.asset,
         formatHint = null,
         httpHeaders = const <String, String>{},
-        super(VideoPlayerValue(duration: Duration.zero));
+        super(const VideoPlayerValue(duration: Duration.zero));
 
-  /// Constructs a [VideoPlayerController] playing a video from obtained from
-  /// the network.
+  /// Constructs a [VideoPlayerController] playing a network video.
   ///
-  /// The URI for the video is given by the [dataSource] argument and must not be
-  /// null.
+  /// The URI for the video is given by the [dataSource] argument.
+  ///
   /// **Android only**: The [formatHint] option allows the caller to override
   /// the video format detection code.
+  ///
   /// [httpHeaders] option allows to specify HTTP headers
   /// for the request to the [dataSource].
+  @Deprecated('Use VideoPlayerController.networkUrl instead')
   VideoPlayerController.network(
     this.dataSource, {
     this.formatHint,
@@ -241,20 +293,43 @@ class VideoPlayerController extends ValueNotifier<VideoPlayerValue> {
   })  : _closedCaptionFileFuture = closedCaptionFile,
         dataSourceType = DataSourceType.network,
         package = null,
-        super(VideoPlayerValue(duration: Duration.zero));
+        super(const VideoPlayerValue(duration: Duration.zero));
+
+  /// Constructs a [VideoPlayerController] playing a network video.
+  ///
+  /// The URI for the video is given by the [dataSource] argument.
+  ///
+  /// **Android only**: The [formatHint] option allows the caller to override
+  /// the video format detection code.
+  ///
+  /// [httpHeaders] option allows to specify HTTP headers
+  /// for the request to the [dataSource].
+  VideoPlayerController.networkUrl(
+    Uri url, {
+    this.formatHint,
+    Future<ClosedCaptionFile>? closedCaptionFile,
+    this.videoPlayerOptions,
+    this.httpHeaders = const <String, String>{},
+  })  : _closedCaptionFileFuture = closedCaptionFile,
+        dataSource = url.toString(),
+        dataSourceType = DataSourceType.network,
+        package = null,
+        super(const VideoPlayerValue(duration: Duration.zero));
 
   /// Constructs a [VideoPlayerController] playing a video from a file.
   ///
   /// This will load the file from a file:// URI constructed from [file]'s path.
+  /// [httpHeaders] option allows to specify HTTP headers, mainly used for hls files like (m3u8).
   VideoPlayerController.file(File file,
-      {Future<ClosedCaptionFile>? closedCaptionFile, this.videoPlayerOptions})
+      {Future<ClosedCaptionFile>? closedCaptionFile,
+      this.videoPlayerOptions,
+      this.httpHeaders = const <String, String>{}})
       : _closedCaptionFileFuture = closedCaptionFile,
         dataSource = Uri.file(file.absolute.path).toString(),
         dataSourceType = DataSourceType.file,
         package = null,
         formatHint = null,
-        httpHeaders = const <String, String>{},
-        super(VideoPlayerValue(duration: Duration.zero));
+        super(const VideoPlayerValue(duration: Duration.zero));
 
   /// Constructs a [VideoPlayerController] playing a video from a contentUri.
   ///
@@ -270,7 +345,7 @@ class VideoPlayerController extends ValueNotifier<VideoPlayerValue> {
         package = null,
         formatHint = null,
         httpHeaders = const <String, String>{},
-        super(VideoPlayerValue(duration: Duration.zero));
+        super(const VideoPlayerValue(duration: Duration.zero));
 
   /// The URI to the video file. This will be in different formats depending on
   /// the [DataSourceType] of the original video.
@@ -331,7 +406,6 @@ class VideoPlayerController extends ValueNotifier<VideoPlayerValue> {
           asset: dataSource,
           package: package,
         );
-        break;
       case DataSourceType.network:
         dataSourceDescription = DataSource(
           sourceType: DataSourceType.network,
@@ -339,19 +413,17 @@ class VideoPlayerController extends ValueNotifier<VideoPlayerValue> {
           formatHint: formatHint,
           httpHeaders: httpHeaders,
         );
-        break;
       case DataSourceType.file:
         dataSourceDescription = DataSource(
           sourceType: DataSourceType.file,
           uri: dataSource,
+          httpHeaders: httpHeaders,
         );
-        break;
       case DataSourceType.contentUri:
         dataSourceDescription = DataSource(
           sourceType: DataSourceType.contentUri,
           uri: dataSource,
         );
-        break;
     }
 
     if (videoPlayerOptions?.mixWithOthers != null) {
@@ -377,28 +449,32 @@ class VideoPlayerController extends ValueNotifier<VideoPlayerValue> {
             rotationCorrection: event.rotationCorrection,
             isInitialized: event.duration != null,
             errorDescription: null,
+            isCompleted: false,
           );
           initializingCompleter.complete(null);
           _applyLooping();
           _applyVolume();
           _applyPlayPause();
-          break;
         case VideoEventType.completed:
           // In this case we need to stop _timer, set isPlaying=false, and
           // position=value.duration. Instead of setting the values directly,
           // we use pause() and seekTo() to ensure the platform stops playing
           // and seeks to the last frame of the video.
           pause().then((void pauseResult) => seekTo(value.duration));
-          break;
+          value = value.copyWith(isCompleted: true);
         case VideoEventType.bufferingUpdate:
           value = value.copyWith(buffered: event.buffered);
-          break;
         case VideoEventType.bufferingStart:
           value = value.copyWith(isBuffering: true);
-          break;
         case VideoEventType.bufferingEnd:
           value = value.copyWith(isBuffering: false);
-          break;
+        case VideoEventType.isPlayingStateUpdate:
+          if (event.isPlaying ?? false) {
+            value =
+                value.copyWith(isPlaying: event.isPlaying, isCompleted: false);
+          } else {
+            value = value.copyWith(isPlaying: event.isPlaying);
+          }
         case VideoEventType.unknown:
           break;
       }
@@ -670,6 +746,7 @@ class VideoPlayerController extends ValueNotifier<VideoPlayerValue> {
     value = value.copyWith(
       position: position,
       caption: _getCaptionAt(position),
+      isCompleted: position == value.duration,
     );
   }
 
